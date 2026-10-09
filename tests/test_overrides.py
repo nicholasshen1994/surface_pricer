@@ -372,7 +372,7 @@ def test_empty_override_config_matches_default_run():
 
 # ------------------------------------------------------------------- CLI wiring
 def test_build_override_config_merges_cli_flags():
-    from surface_pricer.fit_surface_snapshot import _build_override_config, _parse_args
+    from surface_pricer.apps.fit_surface import _build_override_config, _parse_args
 
     args = _parse_args(
         [
@@ -399,14 +399,14 @@ def test_build_override_config_merges_cli_flags():
 
 
 def test_build_override_config_returns_none_without_requests():
-    from surface_pricer.fit_surface_snapshot import _build_override_config, _parse_args
+    from surface_pricer.apps.fit_surface import _build_override_config, _parse_args
 
     assert _build_override_config(_parse_args([])) is None
     assert _build_override_config(_parse_args(["--no-extend-tenors"])) is None
 
 
 def test_build_override_config_rejects_bad_pin():
-    from surface_pricer.fit_surface_snapshot import _build_override_config, _parse_args
+    from surface_pricer.apps.fit_surface import _build_override_config, _parse_args
 
     with pytest.raises(ValueError):
         _build_override_config(_parse_args(["--pin", "2026-12-18:vega=1"]))

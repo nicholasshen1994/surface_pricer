@@ -7,19 +7,42 @@ QuantLib exactly like edslib's ``CNY-FR007`` curve (see
 pricing layer then consumes that JSON through
 :class:`surface_pricer.core.curves.PiecewiseRateCurve`, so QuantLib is only
 needed for this build step.
+
+Every run writes a **new** file under ``<output-root>/ir_curve/``
+(``ir_curve_<YYYYmmdd_HHMMSS>.json``) and points ``latest.json`` at it - nothing
+is overwritten, so a quote can always be traced back to the curve it used
+(:mod:`surface_pricer.io.curve_runs`).  ``--out FILE`` bypasses the run
+bookkeeping and writes exactly that file.
 """
 
 from __future__ import annotations
+
+if __package__ in (None, ""):  # pragma: no cover - plain script launch
+    # IDE "Run" launches the file directly, with no package context; put the
+    # repository root on the path and hand control to the package module
+    # (``python -m ...`` takes this branch never).
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from surface_pricer.apps.build_ir_curve import main
+
+    raise SystemExit(main())
 
 import argparse
 from pathlib import Path
 from typing import Iterable, Optional
 
 from ..core.ir_curve import build_fr007_curve
+from ..io.curve_runs import (
+    IR_CURVE,
+    LATEST_NAME,
+    curve_details,
+    curve_root,
+    record_curve_run,
+)
 from ..marketdata.rate_inputs import SAMPLE_CSV, parse_interest_rate_csv
 from ._common import reporter_for
-
-DEFAULT_OUTPUT = Path(__file__).resolve().parent.parent / "output" / "ir_curve.json"
 
 
 def main(argv: Optional[Iterable[str]] = None) -> int:
@@ -71,9 +94,23 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     report = "\n".join(lines)
     print(report)
 
-    target = Path(args.out) if args.out else DEFAULT_OUTPUT
-    pillars.to_json(str(target))
+    if args.out:
+        target = Path(args.out)
+        pillars.to_json(str(target))
+        print("written  : {}".format(target))
+        return 0
+    try:
+        target = record_curve_run(
+            IR_CURVE,
+            pillars,
+            output_root=args.output_root,
+            details=curve_details(pillars),
+        )
+    except OSError as error:
+        print("ERROR: cannot write the curve run: {}".format(error))
+        return 2
     print("written  : {}".format(target))
+    print("latest   : {}".format(curve_root(IR_CURVE, args.output_root) / LATEST_NAME))
     return 0
 
 
@@ -87,7 +124,15 @@ def _parse_args(argv: Optional[Iterable[str]]) -> argparse.Namespace:
     parser.add_argument(
         "--out",
         default=None,
-        help="output JSON path (default: surface_pricer/output/ir_curve.json)",
+        help=(
+            "write exactly this file, no run bookkeeping (default: a new stamped "
+            "run under <output-root>/ir_curve/, with latest.json pointing at it)"
+        ),
+    )
+    parser.add_argument(
+        "--output-root",
+        default=None,
+        help="output root (default: surface_pricer/output; runs live in its ir_curve/)",
     )
     parser.add_argument(
         "--keep-constant-columns",

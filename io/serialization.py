@@ -8,7 +8,7 @@ from ..core.daycount import BusinessCalendar, DateHelperBusinessCalendar, to_dat
 from ..core.market import MarketState
 from ..fitting.surface import EDSSabrSurface
 from ..marketdata.offline_quotes import OptionQuote, QuoteSlice
-from ..pricing.contracts import VanillaContract
+from ..pricing.vanilla import VanillaContract
 
 
 def curve_from_dict(value, anchor=None, calendar=None, trading_days_per_year=None):

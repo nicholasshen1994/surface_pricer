@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "description": "Barrier-shift pricing rules for autocallable products. Values are in barrier units (1.0 = 100% of the initial spot): 'relative' scales the original barrier level by (1 + value), 'additive' adds value to it. 'stepwise' keeps accruing value/periods per observation up to the full value at the last observation, clamped to [floor, cap] on the accumulated shift; 'step_offset' leaves that many leading observations unshifted. A contract may override the rule or the value (AutocallContract.shift_override); the CLI sits on top of both. Structure mirrors edslib apps/ODTS/indexo_barrier_shift_config.json (effective-date blocks + gap tiers + shift floor) plus the legacy GeneralBarrierShift defaults (-coupon/10 for KO; index-like relative -1.25%, else additive -3% for KI).",
+  "templates": ["autocallable", "snowball", "autocall"],
+  "underlying_classes": {
+    "index_like": ["MO", "IO", "HO", "IF", "IH", "IC", "IM", "000016", "000300", "000688", "000852", "000905", "510300", "510500", "159919"]
+  },
+  "defaults": {
+    "ko_shift": {
+      "rule": "coupon_fraction",
+      "fraction": -0.1,
+      "mode": "relative",
+      "stepwise": true,
+      "step_offset": 0
+    },
+    "ki_shift": {
+      "rule": "underlying_class",
+      "index_like": {"mode": "relative", "value": -0.0125},
+      "other": {"mode": "additive", "value": -0.03},
+      "stepwise": false,
+      "step_offset": 0
+    }
+  },
+  "effective_dates": [
+    {
+      "from": "2026-04-01",
+      "ko_shift": {
+        "rule": "gap_tiers",
+        "tiers": [
+          {"max_gap": 5000000, "value": -0.005},
+          {"max_gap": 10000000, "value": -0.01},
+          {"max_gap": 20000000, "value": -0.015},
+          {"max_gap": 30000000, "value": -0.02},
+          {"value": -0.025}
+        ],
+        "mode": "relative",
+        "stepwise": true,
+        "step_offset": 0,
+        "floor": -0.05
+      }
+    }
+  ]
+}

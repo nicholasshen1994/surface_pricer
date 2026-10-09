@@ -1,0 +1,160 @@
+{
+  "kind": "autocall_schedule",
+  "version": 1,
+  "underlying": "000852.SH",
+  "product_type": "autocallable",
+  "spot0": 6980.0466,
+  "anchored_on": "start_spot",
+  "start_date": "2026-10-09T10:46:37",
+  "day_count": "act/365f",
+  "valuation_date": "2026-10-09T10:46:37",
+  "expiry_date": "2028-10-09T00:00:00",
+  "notional": 1.0,
+  "settlement_days": 0,
+  "observations": [
+    {
+      "date": "2027-01-11",
+      "ko": 6631.044269999999,
+      "coupon_rate": 0.05968745660957407
+    },
+    {
+      "date": "2027-02-11",
+      "ko": 6596.144036999999,
+      "coupon_rate": 0.05968745660957407
+    },
+    {
+      "date": "2027-03-09",
+      "ko": 6561.243804,
+      "coupon_rate": 0.05968745660957407
+    },
+    {
+      "date": "2027-04-09",
+      "ko": 6526.343570999999,
+      "coupon_rate": 0.05968745660957407
+    },
+    {
+      "date": "2027-05-10",
+      "ko": 6491.443337999999,
+      "coupon_rate": 0.05968745660957407
+    },
+    {
+      "date": "2027-06-10",
+      "ko": 6456.543104999999,
+      "coupon_rate": 0.05968745660957407
+    },
+    {
+      "date": "2027-07-09",
+      "ko": 6421.642871999999,
+      "coupon_rate": 0.05968745660957407
+    },
+    {
+      "date": "2027-08-09",
+      "ko": 6386.742638999999,
+      "coupon_rate": 0.05968745660957407
+    },
+    {
+      "date": "2027-09-09",
+      "ko": 6351.842405999999,
+      "coupon_rate": 0.05968745660957407
+    },
+    {
+      "date": "2027-10-11",
+      "ko": 6316.9421729999995,
+      "coupon_rate": 0.05968745660957407
+    },
+    {
+      "date": "2027-11-09",
+      "ko": 6282.041939999999,
+      "coupon_rate": 0.05968745660957407
+    },
+    {
+      "date": "2027-12-09",
+      "ko": 6247.141706999999,
+      "coupon_rate": 0.05968745660957407
+    },
+    {
+      "date": "2028-01-10",
+      "ko": 6212.2414739999995,
+      "coupon_rate": 0.05968745660957407
+    },
+    {
+      "date": "2028-02-09",
+      "ko": 6177.341241,
+      "coupon_rate": 0.05968745660957407
+    },
+    {
+      "date": "2028-03-09",
+      "ko": 6142.441007999999,
+      "coupon_rate": 0.05968745660957407
+    },
+    {
+      "date": "2028-04-10",
+      "ko": 6107.5407749999995,
+      "coupon_rate": 0.05968745660957407
+    },
+    {
+      "date": "2028-05-09",
+      "ko": 6072.640542,
+      "coupon_rate": 0.05968745660957407
+    },
+    {
+      "date": "2028-06-09",
+      "ko": 6037.740309,
+      "coupon_rate": 0.05968745660957407
+    },
+    {
+      "date": "2028-07-10",
+      "ko": 6002.8400759999995,
+      "coupon_rate": 0.05968745660957407
+    },
+    {
+      "date": "2028-08-09",
+      "ko": 5967.939842999999,
+      "coupon_rate": 0.05968745660957407
+    },
+    {
+      "date": "2028-09-11",
+      "ko": 5933.03961,
+      "coupon_rate": 0.05968745660957407
+    },
+    {
+      "date": "2028-10-09",
+      "ko": 5898.1393769999995,
+      "coupon_rate": 0.05968745660957407
+    }
+  ],
+  "knock_out": {
+    "boundary": "inclusive"
+  },
+  "knock_in": {
+    "frequency": "daily",
+    "boundary": "inclusive",
+    "strike": 6980.0466,
+    "gearing": 1.0,
+    "protected_principal": 0.0,
+    "level": 4537.03029
+  },
+  "rebate": 0.05968745660957407,
+  "knocked_in_date": null,
+  "knocked_out_at": null,
+  "knocked_out_cash": null,
+  "shift": {
+    "ko": {
+      "mode": "none",
+      "stepwise": true,
+      "floor": -0.05,
+      "source": "contract-override"
+    },
+    "ki": {
+      "mode": "relative",
+      "value": -0.0125,
+      "source": "config:2026-04-01:ki_shift"
+    },
+    "notes": [
+      "anchor=start_spot",
+      "ko_shift=none",
+      "ki_shift=relative -1.2500% (config:2026-04-01:ki_shift)",
+      "ki_frequency=daily (489 monitoring dates)"
+    ]
+  }
+}

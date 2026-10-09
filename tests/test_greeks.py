@@ -10,8 +10,7 @@ from surface_pricer.core.curves import ConstantRateCurve
 from surface_pricer.core.daycount import BusinessCalendar, year_fraction
 from surface_pricer.core.market import MarketState
 from surface_pricer.fitting.surface import EDSSabrSurface
-from surface_pricer.pricing.contracts import VanillaContract
-from surface_pricer.pricing.greeks import calculate_greeks, convert_bucketed_delta
+from surface_pricer.pricing.vanilla import VanillaContract, calculate_greeks, convert_bucketed_delta
 from surface_pricer.pricing.results import RiskSettings
 from surface_pricer.pricing.vanilla import VanillaPricer
 
@@ -89,6 +88,10 @@ def test_greeks_match_black76_closed_form():
         df * norm.pdf(d1) * moneyness_ratio ** 2 / (forward * VOL * sqrt_tau)
     )
     assert result.gamma == pytest.approx(expected_gamma, rel=1e-3)
+    # cash gamma is the same convexity per (1% spot move)^2
+    assert result.gamma_cash == pytest.approx(
+        result.gamma * SPOT ** 2 / 100.0, rel=1e-12
+    )
 
     # vega / volga (reported per vol point / per vol point squared)
     vega_raw = df * forward * norm.pdf(d1) * sqrt_tau
@@ -139,6 +142,17 @@ def test_theta_matches_direct_reprice():
     expected = VanillaPricer(theta_market).npv(contract) - result.npv
     assert result.theta == pytest.approx(expected, rel=1e-9)
     assert result.theta < 0.0  # long option loses value with time
+
+
+def test_cash_gamma_scales_with_the_notional():
+    market = _market()
+    base = calculate_greeks(_call(), market)
+    scaled = calculate_greeks(
+        VanillaContract(expiry=EXPIRY, strike=STRIKE, option_type="call", notional=25.0),
+        market,
+    )
+
+    assert scaled.gamma_cash == pytest.approx(base.gamma_cash * 25.0, rel=1e-9)
 
 
 def test_volume_scaling_is_linear_in_notional():
@@ -196,11 +210,14 @@ def test_bucketed_rhoq_and_delta_convention():
         )
 
     # the flat curve is rebuilt on the bucket grid first (edslib's
-    # rebuild_ql_curve_by_tenors), so every bucket is a single-pillar bump:
-    # the values differ, the near bucket dominates, and the local buckets add
-    # back up to the parallel rhoQ
+    # rebuild_ql_curve_by_tenors), so every bucket is a single-pillar bump, and
+    # the trade-aware grid (``bucket_grid``) keeps only what the option can see:
+    # four pillars up to and including the one bracketing the expiry
     buckets = list(result.bucketed_rhoq.values())
-    assert len(buckets) == 8
+    assert len(buckets) == 4
+    grid = result.metadata["bucket_grid"]
+    assert (grid["pillars"], grid["buckets"], grid["dropped"]) == (8, 4, 4)
+    assert grid["horizon"] == EXPIRY.date().isoformat()
     # the expiry (2027-03-19) sits between the 3M and 6M pillars, so exactly
     # those two buckets move the forward - single-pillar bumps, not a parallel
     # shift - and the later pillar carries the larger interpolation weight
@@ -243,6 +260,7 @@ def test_greek_conventions_are_documented():
     for name in (
         "delta",
         "gamma",
+        "gamma_cash",
         "vega",
         "theta",
         "vanna",
@@ -280,13 +298,15 @@ def test_bucketed_rhoq_follows_the_borrow_curve_pillars():
     expected = [
         (VALUATION + timedelta(days=days)).date().isoformat() for days in pillar_days
     ]
-    assert list(result.bucketed_rhoq) == expected
+    # the +366d pillar is past the expiry - and past the pillar bracketing it - so
+    # the trade-aware grid drops it; the three the option can see stay
+    assert list(result.bucketed_rhoq) == expected[:3]
+    assert result.metadata["bucket_grid"]["dropped"] == 1
 
     values = list(result.bucketed_rhoq.values())
     # the expiry sits between the 92d and 182d pillars: only those two move the
     # forward, and the later one carries the larger interpolation weight
     assert values[0] == pytest.approx(0.0, abs=1e-15)
-    assert values[3] == pytest.approx(0.0, abs=1e-15)
     assert abs(values[2]) > abs(values[1]) > 0.0
     assert sum(values) == pytest.approx(result.rhoq, rel=1e-3)
 
@@ -374,5 +394,7 @@ def test_intraday_valuation_keeps_the_near_bucket_at_zero():
 
     values = list(result.bucketed_rhoq.values())
     assert values[0] == pytest.approx(0.0, abs=1e-15)
-    assert values[-1] == pytest.approx(0.0, abs=1e-15)
+    # the far pillar is past the expiry, so the grid drops it outright - and the
+    # one bracketing the expiry still carries the sensitivity
+    assert result.metadata["bucket_grid"]["dropped"] == 1
     assert abs(values[2]) > 0.0  # the 182d pillar still brackets the expiry

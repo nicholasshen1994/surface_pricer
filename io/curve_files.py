@@ -1,12 +1,13 @@
-"""Load the generated curve files (``ir_curve.json`` / ``borrow_curve.json``).
+"""Load one curve **run** file (``output/ir_curve/ir_curve_<stamp>.json`` ...).
 
-Both files are produced by ``python -m surface_pricer build-ir-curve`` /
+Both curve kinds are produced by ``python -m surface_pricer build-ir-curve`` /
 ``build-borrow-curve`` (see :mod:`surface_pricer.core.ir_curve` and
-:mod:`surface_pricer.core.borrow_curve`).  The pricing entry points accept them
-through ``--ir-curve`` / ``--borrow-curve`` and receive a
-:class:`surface_pricer.core.curves.PiecewiseRateCurve` - linear on zero rates
-with the same time scale the curve was built with - so the pricing runtime
-never needs QuantLib.
+:mod:`surface_pricer.core.borrow_curve`) as timestamped runs; naming one
+(``latest`` / a path / ``none``) is
+:func:`surface_pricer.io.curve_runs.resolve_curve_path`'s job.  The pricing entry
+points end up with a :class:`surface_pricer.core.curves.PiecewiseRateCurve` -
+linear on zero rates with the same time scale the curve was built with - so the
+pricing runtime never needs QuantLib.
 """
 
 from __future__ import annotations
@@ -14,34 +15,29 @@ from __future__ import annotations
 import json
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, Optional, Union
 
 from ..core.borrow_curve import BorrowCurvePillars
 from ..core.curves import PiecewiseRateCurve
 from ..core.daycount import to_date
 from ..core.ir_curve import IRCurvePillars
 
-#: Default output directory of ``build-ir-curve`` / ``build-borrow-curve``.
-_PACKAGE_OUTPUT = Path(__file__).resolve().parents[1] / "output"
-
 
 def load_ir_curve(path: Union[str, Path]) -> PiecewiseRateCurve:
-    """Read an ``ir_curve.json`` (``build-ir-curve``) as a pricing curve.
+    """Read an ``ir_curve`` run (``build-ir-curve``) as a pricing curve.
 
-    Relative paths resolve against the cwd first and then against the package
-    ``output`` directory, so the plain spelling ``output/ir_curve.json`` works
-    from any working directory.
+    ``path`` is a **file** - resolve ``latest`` / ``none`` first with
+    :func:`surface_pricer.io.curve_runs.resolve_curve_path` (what the CLI flags
+    do).  A missing file is an error naming it: nothing is searched for.
     """
     payload = _read_payload(path, kind="ir_curve.json", required=("curve_name",))
     return IRCurvePillars.from_dict(payload).to_piecewise_curve()
 
 
 def load_borrow_curve(path: Union[str, Path]) -> PiecewiseRateCurve:
-    """Read a ``borrow_curve.json`` (``build-borrow-curve``) as a pricing curve.
+    """Read a ``borrow_curve`` run (``build-borrow-curve``) as a pricing curve.
 
-    Relative paths resolve against the cwd first and then against the package
-    ``output`` directory, so the plain spelling ``output/borrow_curve.json``
-    works from any working directory.
+    Same contract as :func:`load_ir_curve`: the path is taken as given.
     """
     payload = _read_payload(
         path, kind="borrow_curve.json", required=("forward_source", "observed")
@@ -59,39 +55,22 @@ def curve_valuation_date(curve: Any) -> Optional[date]:
     return to_date(anchor)
 
 
-def _locate_curve_file(path: Union[str, Path]) -> Tuple[Optional[Path], List[Path]]:
-    """Find a curve file: as given first, then in the package ``output`` dir.
-
-    Returns the resolved path (``None`` when nothing matched) plus every
-    candidate that was tried, for the error message.
-    """
-    target = Path(path)
-    tried: List[Path] = [target]
-    if target.is_file():
-        return target, tried
-    if not target.is_absolute():
-        fallback = _PACKAGE_OUTPUT / target.name
-        if fallback != target:
-            tried.append(fallback)
-            if fallback.is_file():
-                return fallback, tried
-    return None, tried
-
-
 def _read_payload(
     path: Union[str, Path],
     *,
     kind: str,
     required: tuple,
 ) -> Dict[str, Any]:
-    target, tried = _locate_curve_file(path)
-    if target is None:
+    """Read one curve file - taken **as given**, no fallback locations."""
+    target = Path(path).expanduser()
+    if not target.is_file():
         raise ValueError(
-            "{} not found (tried {}); build it with "
-            "'python -m surface_pricer build-{}'".format(
-                Path(path),
-                ", ".join(str(candidate) for candidate in tried),
-                "ir-curve" if "ir" in kind else "borrow-curve",
+            "{} not found; build it with '{}', or pass 'latest' (the newest run) "
+            "or 'none' (the flat rate)".format(
+                target,
+                "python -m surface_pricer build-ir-curve"
+                if "ir" in kind
+                else "python -m surface_pricer build-borrow-curve",
             )
         )
     try:

@@ -3,7 +3,7 @@
 > 目标：单次 from-scratch 拟合 EDS SABR surface，参数化、清洗、惩罚项、边界与时间口径对齐 edslib CN（`ML.IDX.PRICING.MID`）。
 >
 > 入口：`surface_pricer.fitting.pipeline.fit_surface(snapshot, settings, progress=None)`
-> CLI：`python -m surface_pricer fit`（旧命令 `python -m surface_pricer.fit_surface_snapshot` 仍可用但已 deprecated）
+> CLI：`python -m surface_pricer fit`（旧命令 `python -m surface_pricer.fit_surface_snapshot` 已随包根 shim 一起移除，或直接跑 `apps/fit_surface.py`）
 
 ---
 
@@ -303,7 +303,7 @@ python -m surface_pricer fit --pin "2027-06-18:atm_vol=0.215,skew=0.04"
 python -m surface_pricer fit --override-file overrides.json --extend-tenors
 ```
 
-- 默认参数集中在 `apps/fit_surface.py` 顶部：`DEFAULT_UNDERLYING / DEFAULT_INDEX / DEFAULT_RATE / DEFAULT_WEIGHT_MODE / DEFAULT_MAX_ITERATIONS / DEFAULT_REPORT_ROWS`。
+- 默认参数集中在 `apps/fit_surface.py` 顶部：`DEFAULT_UNDERLYING / DEFAULT_INDEX / DEFAULT_RATE / DEFAULT_WEIGHT_MODE / DEFAULT_MAX_ITERATIONS / DEFAULT_REPORT_ROWS`。其中 **`DEFAULT_RATE` 只在 `--ir-curve none` 时生效**（2026-10）：默认 `--ir-curve latest` 下，拟合的折扣因子与 parity 远期都取自 rate curve（`MarketState.discount_factor` → `rate_curve`），manifest 里记的 `rate` 是**该曲线在 3M 处的 zero**（`flat_rate()`），供之后 `--ir-curve none` 的报价回退使用。
 - 密码读取：真实环境变量 > `--env-file` > `surface_pricer/.env` > 仓库根 `.env`（`QUOTE_GATEWAY_PASSWORD` / `CICC_QUOTE_PASSWORD`）。
 - 输出目录：`surface_pricer/output/<underlying>_<YYYYmmdd_HHMMSS>/`。
 - 手工覆盖与期限延伸：`--pin "EXPIRY:FIELD=VALUE[,...]"`（可重复）、`--override-file PATH`、`--extend-tenors` / `--no-extend-tenors`、`--synthetic-end-tenor` / `--synthetic-months` / `--synthetic-week`；生效配置落盘为 `overrides.json`（见 §11）。

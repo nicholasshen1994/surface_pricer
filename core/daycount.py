@@ -3,7 +3,7 @@
 from datetime import date, datetime, time, timedelta
 import json
 import re
-from typing import Iterable, Optional, Union
+from typing import Iterable, Optional, Tuple, Union
 
 import numpy as np
 
@@ -76,6 +76,18 @@ class BusinessCalendar:
             )
         )
 
+    def next_business_day(self, value: DateLike) -> date:
+        """``value`` itself when it is a business day, else the following one.
+
+        Only forward: a date that falls on a holiday moves to the next open day,
+        which is what a term sheet's roll convention says.  Rolling backwards
+        would settle *before* the scheduled date, so it is not offered here.
+        """
+        current = to_date(value)
+        while not self.is_business_day(current):
+            current += timedelta(days=1)
+        return current
+
 
 class DateHelperBusinessCalendar(BusinessCalendar):
     """China business calendar using the bundled ``DateHelper`` convention.
@@ -120,7 +132,11 @@ def year_fraction(
     and the intraday time of day on both ends is added (scaled by
     ``holiday_weight`` when the endpoint is not a business day).
 
-    Otherwise the function falls back to a simple calendar-day convention.
+    Otherwise the function falls back to a calendar-day convention selected by
+    ``basis``: ``act/365f`` / ``act/360`` (natural days over a fixed denominator)
+    or ``act/act`` (ISDA, see :func:`act_act`).  Coupon accrual goes through here
+    without a calendar, so the **contractual** basis wins over the vol-time
+    convention exactly where it should.
     """
     start_dt = to_datetime(start)
     end_dt = to_datetime(end)
@@ -144,9 +160,77 @@ def year_fraction(
         business_days += end_fraction - start_fraction
         return max(0.0, business_days / float(trading_days_per_year))
 
-    basis_lower = basis.lower().replace(" ", "")
+    basis_lower = basis.lower().replace(" ", "").replace("/", "").replace(".", "")
+    if basis_lower in {"actact", "actualactual", "actactisda", "actualactualisda"}:
+        return max(0.0, act_act(start_dt, end_dt))
     denominator = 365.0 if "365" in basis_lower else 360.0
     return max(0.0, (end_dt - start_dt).total_seconds() / 86400.0 / denominator)
+
+
+#: Day counts accepted for coupon / rebate accrual (see :func:`resolve_basis`).
+ACCRUAL_BASES = ("act/365f", "act/360", "act/act")
+
+#: The accepted names, keyed by their punctuation-free form: ``Act/365F`` and
+#: ``ACT-ACT`` still read, while a *different* name - ``act365``, ``actualactual``,
+#: ``actactisda``, the synonyms this used to translate (2026-10) - is refused.  One
+#: name per basis, so a payload cannot say "365 fixed" two ways.
+_BASIS_BY_KEY = {
+    basis.replace("/", "").replace("-", "").replace(".", ""): basis
+    for basis in ACCRUAL_BASES
+}
+
+
+def resolve_basis(value: Optional[str]) -> str:
+    """Normalise an accrual day count (``None`` -> ``act/365f``); raise if unknown.
+
+    Validating here rather than in :func:`year_fraction` keeps that function's
+    historical leniency (anything without a "365" counts as 360) while the
+    *contractual* accrual basis is checked once, where a typo would otherwise
+    silently price a different coupon.  Case and separators are tolerated; the
+    alias names are not.
+    """
+    key = (
+        str(value if value is not None else "act/365f")
+        .strip()
+        .lower()
+        .replace(" ", "")
+        .replace("/", "")
+        .replace("-", "")
+        .replace(".", "")
+    )
+    resolved = _BASIS_BY_KEY.get(key)
+    if resolved is None:
+        raise ValueError(
+            "unsupported day count {!r}: choose from {}".format(
+                value, ", ".join(ACCRUAL_BASES)
+            )
+        )
+    return resolved
+
+
+def _is_leap_year(year: int) -> bool:
+    return year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
+
+
+def act_act(start: DateLike, end: DateLike) -> float:
+    """ISDA act/act year fraction: each calendar year over its own length.
+
+    A coupon period spanning a year end accrues ``d1/365 + d2/366`` (or the other
+    way round), which is what an act/act term sheet pays - a single ``days/365``
+    would be short by the leap-day adjustment.
+    """
+    start_dt = to_datetime(start)
+    end_dt = to_datetime(end)
+    if end_dt <= start_dt:
+        return 0.0
+    total = 0.0
+    for year in range(start_dt.year, end_dt.year + 1):
+        begin = max(start_dt, datetime(year, 1, 1))
+        finish = min(end_dt, datetime(year + 1, 1, 1))
+        if finish > begin:
+            days = (finish - begin).total_seconds() / 86400.0
+            total += days / (366.0 if _is_leap_year(year) else 365.0)
+    return total
 
 
 def shift_days(value: DateLike, days: int) -> datetime:
@@ -202,3 +286,43 @@ def shift_tenor(
     while not calendar.is_business_day(target):
         target += timedelta(days=1)
     return target
+
+
+def month_grid(
+    end: DateLike,
+    months: int,
+    after: DateLike,
+    calendar: Optional[BusinessCalendar] = None,
+) -> Tuple[date, ...]:
+    """Dates stepping back from ``end`` by ``months``, ascending.
+
+    ``end`` itself plus every ``months`` months earlier, keeping only what is
+    **strictly after** ``after`` - the observation grid of a periodic note
+    (``months=3`` = quarterly, counted back from the expiry).  An ``end`` that is
+    not after ``after`` yields nothing, which is how a caller notices that a term
+    sheet has no observation left.
+
+    With a ``calendar`` every date is rolled **forward to the next business day**:
+    an observation cannot fall on a holiday, and a weekend or a Golden-week date
+    moves to the next open day (the expiry included, where that is a no-op
+    because it comes off ``shift_tenor``).  Dates that meet after rolling collapse
+    into one, so the result stays strictly increasing - it may just be shorter
+    than the raw grid.
+    """
+    step = int(months)
+    if step <= 0:
+        raise ValueError("months must be positive, got {}".format(months))
+    last = to_date(end)
+    boundary = to_date(after)
+    if last <= boundary:
+        return ()
+    dates: list = [last]
+    cursor = last
+    while True:
+        cursor = _add_months(cursor, -step)
+        if cursor <= boundary:
+            break
+        dates.append(cursor)
+    if calendar is None:
+        return tuple(sorted(dates))
+    return tuple(sorted({calendar.next_business_day(day) for day in dates}))

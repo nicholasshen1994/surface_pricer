@@ -32,16 +32,21 @@ if __package__ in (None, ""):  # pragma: no cover - plain script launch
 import argparse
 import time
 from dataclasses import replace
+from datetime import timedelta
 from pathlib import Path
 from typing import Iterable, Optional
+
+from ..core.daycount import to_datetime
 
 from ..fitting.overrides import OverrideConfig, parse_pin_spec
 from ..fitting.pipeline import fit_surface
 from ..fitting.settings import FitSettings
 from ..io.curve_files import load_borrow_curve, load_ir_curve
-from ..io.fit_runs import record_fit_run
+from ..io.curve_runs import BORROW_CURVE, IR_CURVE, resolve_curve_path
+from ..io.fit_runs import default_output_root, fit_run_root, record_fit_run
 from ..marketdata.gateway import QuoteGatewaySnapshotClient
 from ..marketdata.providers import QuoteApiDataProvider
+from ..marketdata.registry import get_underlying_spec
 from ..reporting.fit_report import format_fit_report
 from ..reporting.plots import plot_fit_result
 from ._common import (
@@ -65,7 +70,9 @@ DEFAULT_HOST = "10.43.1.9"
 DEFAULT_PORT = 7070
 DEFAULT_USER = "eq_eds_trd"
 
-DEFAULT_OUTPUT_ROOT = Path(__file__).resolve().parent.parent / "output"
+#: The **output root**: run folders land in its ``vol_fit/``, the curve runs in its
+#: ``ir_curve/`` / ``borrow_curve/`` (one flag redirects the whole book).
+DEFAULT_OUTPUT_ROOT = default_output_root()
 
 
 def main(argv: Optional[Iterable[str]] = None) -> int:
@@ -86,6 +93,15 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     user = env("QUOTE_GATEWAY_USER", "CICC_QUOTE_USER") or DEFAULT_USER
 
     underlying = str(args.underlying).strip().upper()
+    # The **index** this run prices: the venue's cash index (MO -> 000852.SH), or
+    # the ``--index`` override.  It is what the per-index borrow curve is filed
+    # under, so it has to be known *before* the curves are resolved - and it is the
+    # same value the run is named by further down.
+    index_key = (
+        args.index
+        or getattr(get_underlying_spec(underlying), "index_ticker", None)
+        or underlying
+    )
     try:
         override_config = _build_override_config(args)
     except (OSError, ValueError) as error:
@@ -106,18 +122,32 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         )
 
     try:
-        rate_curve = load_ir_curve(args.ir_curve) if args.ir_curve else None
-        borrow_curve = load_borrow_curve(args.borrow_curve) if args.borrow_curve else None
+        ir_curve_file = resolve_curve_path(
+            IR_CURVE, args.ir_curve, output_root=args.output_dir
+        )
+        borrow_curve_file = resolve_curve_path(
+            BORROW_CURVE,
+            args.borrow_curve,
+            output_root=args.output_dir,
+            index=index_key,
+        )
+    except ValueError as error:
+        print("ERROR: cannot resolve curve: {}".format(error))
+        return 2
+    try:
+        rate_curve = load_ir_curve(ir_curve_file) if ir_curve_file else None
+        borrow_curve = (
+            load_borrow_curve(borrow_curve_file) if borrow_curve_file else None
+        )
     except ValueError as error:
         print("ERROR: cannot load curve: {}".format(error))
         return 2
-    if rate_curve is not None or borrow_curve is not None:
-        reporter(
-            "curves     | ir={} | borrow={}".format(
-                args.ir_curve or "flat {:.4f}".format(float(args.rate)),
-                args.borrow_curve or "(none)",
-            )
+    reporter(
+        "curves     | ir={} | borrow={}".format(
+            ir_curve_file.name if ir_curve_file else "flat {:.4f}".format(float(args.rate)),
+            borrow_curve_file.name if borrow_curve_file else "(none)",
         )
+    )
 
     started = time.perf_counter()
     reporter("connecting to quote gateway {}:{} as {} ...".format(host, port, user))
@@ -128,8 +158,9 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             rate_curve=rate_curve,
             borrow_curve=borrow_curve,
         )
+        spec = provider.spec_for(underlying)
         if args.index:
-            spec = replace(provider.spec_for(underlying), index_ticker=str(args.index))
+            spec = replace(spec, index_ticker=str(args.index))
             provider = QuoteApiDataProvider(
                 client,
                 rate=float(args.rate),
@@ -137,6 +168,10 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
                 borrow_curve=borrow_curve,
                 spec_overrides={underlying: spec},
             )
+        # The cash index the venue references (``MO`` -> ``000852.SH``): the run is
+        # named by *it* and the manifest records both, because the same index
+        # snowball may be fitted from different venues (000905 from 510500).
+        index_ticker = getattr(spec, "index_ticker", None)
         reporter("loading {} option chain + spot snapshot ...".format(underlying))
         load_started = time.perf_counter()
         snapshot = provider.load(underlying)
@@ -145,8 +180,11 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     reporter("fit stage finished in {:.1f}s".format(time.perf_counter() - started))
 
     stamp = result.valuation_datetime.strftime("%Y%m%d_%H%M%S")
-    output_root = Path(args.output_dir) if args.output_dir else DEFAULT_OUTPUT_ROOT
-    output_dir = output_root / "{}_{}".format(underlying, stamp)
+    # the run goes in **its index's** folder (vol_fit/000852/): the folder says which
+    # index it is, next to that index's own index.json / latest.json pointer
+    output_dir = fit_run_root(
+        args.output_dir, index=index_ticker or underlying
+    ) / "{}_{}".format(run_label(index_ticker or underlying), stamp)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     report = format_fit_report(result, max_smile_rows_per_expiry=int(args.report_rows))
@@ -170,13 +208,18 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     run = record_fit_run(
         output_dir,
         surface=result.surface,
-        underlying=underlying,
+        # The run prices the **index**: that is the space the barriers and the spot
+        # live in, and what ``build_json`` falls back to when a term sheet omits its
+        # underlying.  The option venue it was fitted from travels in ``extra``.
+        underlying=index_ticker or underlying,
         valuation_datetime=result.valuation_datetime,
         spot=result.spot,
         settings=settings,
         metrics=result.metrics,
         overrides=override_config,
-        rate=float(args.rate),
+        # the run's flat rate: the --rate only when no curve was used, otherwise
+        # the curve read at 3M (see :func:`flat_rate`)
+        rate=flat_rate(rate_curve, result.valuation_datetime, fallback=float(args.rate)),
         calendar_name=getattr(result.surface.calendar, "name", None),
         trading_days_per_year=result.surface.trading_days_per_year,
         holiday_weight=result.surface.holiday_weight,
@@ -184,8 +227,10 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             "host": host,
             "user": user,
             "scenario": "snapshot",
-            "ir_curve": args.ir_curve,
-            "borrow_curve": args.borrow_curve,
+            "ir_curve": str(ir_curve_file) if ir_curve_file else None,
+            "borrow_curve": str(borrow_curve_file) if borrow_curve_file else None,
+            "option_underlying": underlying,
+            "index_underlying": index_ticker,
         },
     )
     print("fit run  : {}".format(run.describe()))
@@ -194,20 +239,65 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     return 0
 
 
+def run_label(value: object) -> str:
+    """The run-name stem of an underlying: the bare code, no venue suffix."""
+    text = str(value or "").strip().upper()
+    head, dot, _ = text.partition(".")
+    return head if dot else text
+
+
+#: Reference tenor of the flat rate a run records when it was fitted with a curve.
+FLAT_RATE_TENOR_DAYS = 90
+
+
+def flat_rate(rate_curve, valuation, fallback: float) -> float:
+    """The flat rate that *stands for* the curve a run was fitted with.
+
+    With a curve - ``--ir-curve latest`` is the default - the fit discounts and
+    implies its parity forwards off **that curve**
+    (:meth:`~surface_pricer.core.market.MarketState.discount_factor`), and the flat
+    ``--rate`` is only the fallback for ``--ir-curve none``.  The manifest still
+    carries one number, read off the curve at :data:`FLAT_RATE_TENOR_DAYS` (3M), so
+    a later quote that asks for the flat rate gets the rate this run actually saw
+    instead of a stale program default.  No curve -> exactly the ``--rate`` used.
+    """
+    if rate_curve is None:
+        return float(fallback)
+    when = to_datetime(valuation) + timedelta(days=FLAT_RATE_TENOR_DAYS)
+    return float(rate_curve.zero_rate(when))
+
+
 def _parse_args(argv: Optional[Iterable[str]]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="surface_pricer fit")
     parser.add_argument("--underlying", default=DEFAULT_UNDERLYING)
     parser.add_argument("--index", default=DEFAULT_INDEX, help="override the default index level ticker")
-    parser.add_argument("--rate", type=float, default=DEFAULT_RATE)
+    parser.add_argument(
+        "--rate",
+        type=float,
+        default=DEFAULT_RATE,
+        help=(
+            "flat rate, used only with '--ir-curve none' (default {}); with a curve "
+            "the fit discounts off the curve and the run records its 3M zero".format(
+                DEFAULT_RATE
+            )
+        ),
+    )
     parser.add_argument(
         "--ir-curve",
-        default=None,
-        help="ir_curve.json from 'build-ir-curve' (replaces --rate)",
+        default="latest",
+        help=(
+            "ir_curve run from 'build-ir-curve': 'latest' (default) / a path / "
+            "'none' (flat --rate)"
+        ),
     )
     parser.add_argument(
         "--borrow-curve",
-        default=None,
-        help="borrow_curve.json from 'build-borrow-curve' (adds borrow to the forwards)",
+        default="latest",
+        help=(
+            "borrow_curve run from 'build-borrow-curve': 'latest' (default) = the "
+            "newest run **for this run's index** / a path / 'none' (no borrow in "
+            "the forwards)"
+        ),
     )
     parser.add_argument(
         "--weight-mode",
@@ -216,7 +306,15 @@ def _parse_args(argv: Optional[Iterable[str]]) -> argparse.Namespace:
     )
     parser.add_argument("--maxiter", type=int, default=DEFAULT_MAX_ITERATIONS)
     parser.add_argument("--report-rows", type=int, default=DEFAULT_REPORT_ROWS)
-    parser.add_argument("--output-dir", default=None)
+    parser.add_argument(
+        "--output-dir",
+        default=None,
+        help=(
+            "output root (default: surface_pricer/output); the run lands in its "
+            "vol_fit/<index>/, next to the ir_curve/ and borrow_curve/<index>/ "
+            "run folders"
+        ),
+    )
     parser.add_argument("--env-file", default=None, help="additional .env file with gateway credentials")
     parser.add_argument("--no-plot", action="store_true")
     parser.add_argument("--show", action="store_true")

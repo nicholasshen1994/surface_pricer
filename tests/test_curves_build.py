@@ -290,41 +290,177 @@ def test_curve_files_load_and_reject_wrong_payloads(tmp_path):
         load_borrow_curve(tmp_path / "nope.json")
 
 
-def test_curve_files_resolve_relative_paths_in_package_output(tmp_path, monkeypatch):
-    """`output/borrow_curve.json` (and the bare name) work from any cwd."""
-    from surface_pricer.io import curve_files
-    from surface_pricer.io.curve_files import curve_valuation_date, load_borrow_curve
+def test_the_flat_rate_stands_for_the_curve():
+    """A run's recorded flat rate follows its curve (3M), not the program default."""
+    from surface_pricer.apps.fit_surface import flat_rate
+    from surface_pricer.core.curves import ConstantRateCurve, PiecewiseRateCurve
 
-    output_dir = tmp_path / "package-output"
-    output_dir.mkdir()
-    curve = ConstantRateCurve(RATE, anchor=VALUATION)
-    build_borrow_curve(VALUATION, SPOT, _forwards_from_borrow(), curve).to_json(
-        output_dir / "borrow_curve.json"
+    # no curve -> exactly the --rate that was passed
+    assert flat_rate(None, VALUATION, fallback=0.015) == pytest.approx(0.015)
+
+    flat = ConstantRateCurve(0.0205, anchor=VALUATION)
+    assert flat_rate(flat, VALUATION, fallback=0.015) == pytest.approx(0.0205)
+
+    # 3M is a pillar of this curve, and that pillar is what gets recorded
+    curve = PiecewiseRateCurve(
+        anchor=VALUATION, tenors=[1, 90, 365], rates=[0.0100, 0.0200, 0.0250]
     )
-    elsewhere = tmp_path / "elsewhere"
-    elsewhere.mkdir()
+    assert flat_rate(curve, VALUATION, fallback=0.015) == pytest.approx(0.0200)
 
-    monkeypatch.setattr(curve_files, "_PACKAGE_OUTPUT", output_dir)
-    monkeypatch.chdir(elsewhere)
 
-    # the cwd miss falls back to the build-* output directory, by file name
-    for spelled in ("output/borrow_curve.json", "borrow_curve.json"):
-        loaded = load_borrow_curve(spelled)
-        assert curve_valuation_date(loaded) == VALUATION
-        assert loaded.zero_rate(VALUATION + timedelta(days=31)) == pytest.approx(
-            BORROW, abs=1e-9
+def test_borrow_runs_are_filed_in_the_index_folder(tmp_path):
+    """One folder per index: ``latest`` is the newest run **of that folder**."""
+    import json
+
+    from surface_pricer.io import curve_runs
+
+    curve = ConstantRateCurve(RATE, anchor=VALUATION)
+    pillars = build_borrow_curve(VALUATION, SPOT, _forwards_from_borrow(), curve)
+
+    first = curve_runs.record_curve_run(
+        "borrow_curve", pillars, output_root=tmp_path, stamp="20261009_090000", index="000852.SH"
+    )
+    other = curve_runs.record_curve_run(
+        "borrow_curve", pillars, output_root=tmp_path, stamp="20261009_091000", index="510500"
+    )
+    newer = curve_runs.record_curve_run(
+        "borrow_curve", pillars, output_root=tmp_path, stamp="20261009_100000", index="000852"
+    )
+
+    # the **folder** says which index it is - the file name does not have to
+    assert first == (
+        tmp_path / "borrow_curve" / "000852" / "borrow_curve_20261009_090000.json"
+    )
+    assert other.parent == tmp_path / "borrow_curve" / "510500"
+    assert first.is_file()  # the superseded run stays on disk
+
+    pointer = json.loads((first.parent / "latest.json").read_text(encoding="utf-8"))
+    assert pointer["borrow_curve"] == newer.name
+    assert curve_runs.latest_curve_path("borrow_curve", tmp_path, index="000852.SH") == newer
+    assert curve_runs.latest_curve_path("borrow_curve", tmp_path, index="510500.SH") == other
+    assert curve_runs.list_curve_runs("borrow_curve", tmp_path, index="000852") == [
+        newer,
+        first,
+    ]
+
+    # an index with no folder is an error naming the ones there are - never a neighbour's
+    with pytest.raises(ValueError, match="159915"):
+        curve_runs.resolve_curve_path(
+            "borrow_curve", "latest", output_root=tmp_path, index="159915.SZ"
+        )
+    with pytest.raises(ValueError, match="000852, 510500"):
+        curve_runs.latest_curve_path("borrow_curve", tmp_path, index="159915")
+
+    # a per-index kind refuses a run that does not say whose it is
+    with pytest.raises(ValueError, match="filed per index"):
+        curve_runs.record_curve_run("borrow_curve", pillars, output_root=tmp_path)
+
+    # the rate kind is one curve for everything: flat folder, index ignored
+    ir = curve_runs.record_curve_run(
+        "ir_curve", pillars, output_root=tmp_path, stamp="20261009_090000"
+    )
+    assert ir.parent == tmp_path / "ir_curve"
+    assert curve_runs.latest_curve_path("ir_curve", tmp_path, index="510500") == ir
+    assert curve_runs.resolve_curve_path(
+        "ir_curve", "latest", output_root=tmp_path, index="510500"
+    ) == ir
+
+
+def test_a_flat_borrow_pointer_is_still_read_but_loses_to_the_folder(tmp_path):
+    """Runs from before the index folders: read flat, then superseded by the folder."""
+    import json
+
+    from surface_pricer.io import curve_runs
+
+    flat = curve_runs.curve_root("borrow_curve", tmp_path)
+    flat.mkdir(parents=True, exist_ok=True)
+    legacy = flat / "borrow_curve_20261008_101542.json"
+    legacy.write_text("{}", encoding="utf-8")
+    (flat / "latest.json").write_text(
+        json.dumps({"borrow_curve": legacy.name}), encoding="utf-8"
+    )
+
+    # a single name is "the one borrow every index used", so any index resolves it
+    for index in ("000852", "510500.SH"):
+        assert (
+            curve_runs.resolve_curve_path(
+                "borrow_curve", "latest", output_root=tmp_path, index=index
+            )
+            == legacy
         )
 
-    # absolute paths are never redirected, and misses list what was tried
-    missing = elsewhere / "borrow_curve.json"
-    with pytest.raises(ValueError) as error:
-        load_borrow_curve(missing)
-    assert str(missing) in str(error.value)
-    assert str(output_dir / "borrow_curve.json") not in str(error.value)
+    # ... the short-lived per-index **map** shape is read too
+    other = flat / "borrow_curve_20261009_080000.json"
+    other.write_text("{}", encoding="utf-8")
+    (flat / "latest.json").write_text(
+        json.dumps({"borrow_curve": {"000852": legacy.name, "510500": other.name}}),
+        encoding="utf-8",
+    )
+    assert (
+        curve_runs.latest_curve_path("borrow_curve", tmp_path, index="510500.SH") == other
+    )
 
-    with pytest.raises(ValueError) as error:
-        load_borrow_curve("output/ir_curve.json")
-    assert str(output_dir / "ir_curve.json") in str(error.value)
+    # ... and once an index has its own folder, that folder wins over both
+    curve = ConstantRateCurve(RATE, anchor=VALUATION)
+    pillars = build_borrow_curve(VALUATION, SPOT, _forwards_from_borrow(), curve)
+    fresh = curve_runs.record_curve_run(
+        "borrow_curve", pillars, output_root=tmp_path, stamp="20261009_120000", index="000852"
+    )
+    assert curve_runs.latest_curve_path("borrow_curve", tmp_path, index="000852") == fresh
+    # the index without a folder still reads the flat pointer
+    assert curve_runs.latest_curve_path("borrow_curve", tmp_path, index="510500") == other
+
+
+def test_curve_runs_are_stamped_and_latest_follows_the_newest(tmp_path):
+    """Every build writes a **new** run; ``latest`` follows the pointer, nothing is overwritten."""
+    from surface_pricer.io import curve_runs
+    from surface_pricer.io.curve_files import curve_valuation_date, load_borrow_curve
+
+    curve = ConstantRateCurve(RATE, anchor=VALUATION)
+    pillars = build_borrow_curve(VALUATION, SPOT, _forwards_from_borrow(), curve)
+
+    first = curve_runs.record_curve_run(
+        "borrow_curve", pillars, output_root=tmp_path, stamp="20261008_101541", index="000852"
+    )
+    second = curve_runs.record_curve_run(
+        "borrow_curve", pillars, output_root=tmp_path, stamp="20261008_120000", index="000852"
+    )
+
+    assert first.name == "borrow_curve_20261008_101541.json"
+    assert second.name == "borrow_curve_20261008_120000.json"
+    assert first.is_file() and second.is_file()  # the older run survives the newer one
+    assert (
+        curve_runs.latest_curve_path("borrow_curve", tmp_path, index="000852") == second
+    )
+    assert (
+        curve_runs.resolve_curve_path(
+            "borrow_curve", "latest", output_root=tmp_path, index="000852"
+        )
+        == second
+    )
+    assert curve_runs.resolve_curve_path("borrow_curve", "none", output_root=tmp_path) is None
+    assert curve_runs.resolve_curve_path("borrow_curve", None, output_root=tmp_path) is None
+
+    # the index lists both, newest first, and a run still loads as a pricing curve
+    index = curve_runs.read_curve_index("borrow_curve", tmp_path, index="000852")
+    assert [item["file"] for item in index] == [second.name, first.name]
+    loaded = load_borrow_curve(second)
+    assert curve_valuation_date(loaded) == VALUATION
+    assert loaded.zero_rate(VALUATION + timedelta(days=31)) == pytest.approx(BORROW, abs=1e-9)
+
+    # a path is taken as given: a miss names it, it does not go looking
+    with pytest.raises(ValueError, match="not found"):
+        curve_runs.resolve_curve_path("borrow_curve", str(tmp_path / "nope.json"))
+    with pytest.raises(ValueError, match="not found"):
+        load_borrow_curve(tmp_path / "nope.json")
+
+
+def test_latest_without_a_run_is_an_error(tmp_path):
+    """``latest`` with an empty folder fails loudly - the flat rate is ``none``."""
+    from surface_pricer.io import curve_runs
+
+    with pytest.raises(ValueError, match="build-ir-curve"):
+        curve_runs.resolve_curve_path("ir_curve", "latest", output_root=tmp_path)
 
 
 def test_market_from_surface_accepts_curve_objects():

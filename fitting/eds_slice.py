@@ -13,10 +13,11 @@ from typing import Iterable, List
 import numpy as np
 from scipy.interpolate import CubicHermiteSpline
 from scipy.optimize import brentq
-from scipy.stats import norm
+from scipy.special import ndtr
 
 from ..core.math.black import black_price
 from ..core.math.implied_vol import implied_vol
+from ..core.math.jaeckel import implied_vol_jaeckel
 
 
 GL_X, GL_W = np.polynomial.legendre.leggauss(16)
@@ -44,6 +45,26 @@ def _gl_integral(function, start: float, end: float, vector_function=None) -> fl
     )
 
 
+def _gl_integrals(vector_function, edges) -> np.ndarray:
+    """Batched :func:`_gl_integral` over the intervals ``edges[i] .. edges[i+1]``.
+
+    The same 16-point Gauss-Legendre rule, the same per-interval dot product as
+    :func:`_gl_integral` - only evaluated for every interval at once: all the
+    quadrature points go through ``vector_function`` in a single call and the
+    reduction is one matrix product.  This is the hottest line of the local-vol
+    build (the slice grid is rebuilt on every calibration iteration, ~13 times per
+    slice), where the per-interval Python call + spline evaluation dominated.
+    """
+    edges = np.asarray(edges, dtype=float)
+    lower = edges[:-1]
+    upper = edges[1:]
+    half = 0.5 * (upper - lower)
+    center = 0.5 * (upper + lower)
+    points = center[:, None] + half[:, None] * GL_X[None, :]
+    values = np.asarray(vector_function(points.ravel()), dtype=float).reshape(points.shape)
+    return half * (values @ GL_W)
+
+
 def _rk4(function, x0: float, y0: float, x1: float, steps: int = 100) -> float:
     if x1 == x0:
         return y0
@@ -63,8 +84,8 @@ def _rk4(function, x0: float, y0: float, x1: float, steps: int = 100) -> float:
 
 def _norm_cdf_diff(x1: float, x2: float) -> float:
     if x1 * x2 < 0.0 or x1 < 0.0:
-        return float(norm.cdf(x1) - norm.cdf(x2))
-    return float(norm.cdf(-x2) - norm.cdf(-x1))
+        return float(ndtr(x1) - ndtr(x2))
+    return float(ndtr(-x2) - ndtr(-x1))
 
 
 def _smooth_max(a: float, b: float, step: float) -> float:
@@ -313,17 +334,13 @@ class EDSSabrSlice:
             solution *= self.vol_atmf / current
             if solution < 0.001 or solution > 10.0:
                 break
-            self.int_vol_ref = solution
-            self.int_vol_knot_array = self._int_vol_add + self.int_vol_ref
-            self._generate_xy_grid()
+            self._set_int_vol(solution)
             current = self._vol_at_moneyness(self.ref_strike_div_fwd)
             count += 1
 
         if not np.isfinite(current) or abs(current - self.vol_atmf) > 0.01:
             def objective(value):
-                self.int_vol_ref = value
-                self.int_vol_knot_array = self._int_vol_add + value
-                self._generate_xy_grid()
+                self._set_int_vol(value)
                 return self._vol_at_moneyness(self.ref_strike_div_fwd) - self.vol_atmf
 
             try:
@@ -331,7 +348,18 @@ class EDSSabrSlice:
             except Exception:
                 solution = self.vol_atmf
 
-        self.int_vol_ref = solution
+        # The grid is rebuilt only when the vol level actually moved: after the
+        # fixed-point loop it already matches ``solution`` (the loop's last act was
+        # to rebuild for it), so the unconditional rebuild this used to do was one
+        # whole grid construction - the single most expensive step here - per slice
+        # for nothing.  A ``break``/``brentq`` leaves it on the last *probe*, and
+        # then it is rebuilt.
+        if self.int_vol_ref != solution:
+            self._set_int_vol(solution)
+
+    def _set_int_vol(self, value: float) -> None:
+        """Point the slice at ``int_vol_ref = value`` and rebuild its grid."""
+        self.int_vol_ref = value
         self.int_vol_knot_array = self._int_vol_add + self.int_vol_ref
         self._generate_xy_grid()
 
@@ -691,35 +719,24 @@ class EDSSabrSlice:
             )
             * INVSQRT2PI
         )
-        self.key_y_integral = np.asarray(
-            [
-                _gl_integral(
-                    self.y_int,
-                    self.key_x_grid[index],
-                    self.key_x_grid[index + 1],
-                    vector_function=self.y_int_vec,
-                )
-                for index in range(len(self.key_x_grid) - 1)
-            ],
-            dtype=float,
-        )
+        self.key_y_integral = _gl_integrals(self.y_int_vec, self.key_x_grid)
         upper_x = self.key_x_grid[1:]
         lower_x = self.key_x_grid[:-1]
         self.key_x_prob = np.where(
             (upper_x * lower_x < 0.0) | (upper_x < 0.0),
-            norm.cdf(upper_x) - norm.cdf(lower_x),
-            norm.cdf(-lower_x) - norm.cdf(-upper_x),
+            ndtr(upper_x) - ndtr(lower_x),
+            ndtr(-lower_x) - ndtr(-upper_x),
         )
-        self.key_x_prob[0] = norm.cdf(self.key_x_grid[1])
-        self.key_x_prob[-1] = norm.cdf(-self.key_x_grid[-2])
+        self.key_x_prob[0] = ndtr(self.key_x_grid[1])
+        self.key_x_prob[-1] = ndtr(-self.key_x_grid[-2])
         slope_start = (self.key_y_grid[1] - self.key_y_grid[0]) / (self.key_x_grid[1] - self.key_x_grid[0])
         intercept_start = self.key_y_grid[0] - slope_start * self.key_x_grid[0]
         slope_end = (self.key_y_grid[-1] - self.key_y_grid[-2]) / (self.key_x_grid[-1] - self.key_x_grid[-2])
         intercept_end = self.key_y_grid[-1] - slope_end * self.key_x_grid[-1]
-        self.y_prob_add_stt = norm.cdf(self.key_x_grid[0] - slope_start) * math.exp(
+        self.y_prob_add_stt = ndtr(self.key_x_grid[0] - slope_start) * math.exp(
             0.5 * slope_start * slope_start + intercept_start
         )
-        self.y_prob_add_end = norm.cdf(slope_end - self.key_x_grid[-1]) * math.exp(
+        self.y_prob_add_end = ndtr(slope_end - self.key_x_grid[-1]) * math.exp(
             0.5 * slope_end * slope_end + intercept_end
         )
         self.key_y_integral[0] += self.y_prob_add_stt
@@ -729,13 +746,12 @@ class EDSSabrSlice:
         self.key_y_integral /= self.exp_y_adj
         self.exp_y_grid = np.exp(self.key_y_grid) / self.exp_y_adj
         self.key_y_int_from_left = self.key_y_integral.cumsum()
-        self.key_y_int_to_right = np.asarray(
-            [self.key_y_integral[index:].sum() for index in range(len(self.key_y_integral))]
-        )
+        # Suffix sums in O(n): the O(n^2) Python loop this replaces (one numpy
+        # ``sum`` per index) cost more than everything else in the grid build put
+        # together after the quadrature itself.  Same values to rounding.
+        self.key_y_int_to_right = np.cumsum(self.key_y_integral[::-1])[::-1]
         self.key_x_prob_from_left = self.key_x_prob.cumsum()
-        self.key_x_prob_to_right = np.asarray(
-            [self.key_x_prob[index:].sum() for index in range(len(self.key_x_prob))]
-        )
+        self.key_x_prob_to_right = np.cumsum(self.key_x_prob[::-1])[::-1]
 
     def _vol_at_moneyness(self, moneyness: float) -> float:
         if moneyness < self.exp_y_grid[1]:
@@ -770,7 +786,7 @@ class EDSSabrSlice:
                     )
                     + self.y_prob_add_stt
                 ) / self.exp_y_adj
-                sum_x = moneyness * norm.cdf(x_value)
+                sum_x = moneyness * ndtr(x_value)
             else:
                 sum_y = self.key_y_integral[: grid_index - 1].sum() + _gl_integral(
                     self.y_int,
@@ -783,7 +799,7 @@ class EDSSabrSlice:
                     + _norm_cdf_diff(x_value, x_base)
                 )
             put_price = (sum_x - sum_y) / self.sum_prob
-            return implied_vol(put_price, 1.0, moneyness, self.tau, 1.0, "put")
+            return self._invert(put_price, moneyness, "put")
 
         if grid_index >= len(self.exp_y_grid) - 2:
             sum_y = (
@@ -795,7 +811,7 @@ class EDSSabrSlice:
                 )
                 + self.y_prob_add_end
             ) / self.exp_y_adj
-            sum_x = moneyness * norm.cdf(-x_value)
+            sum_x = moneyness * ndtr(-x_value)
         else:
             sum_y = self.key_y_integral[grid_index:].sum() + _gl_integral(
                 self.y_int,
@@ -808,7 +824,21 @@ class EDSSabrSlice:
                 + _norm_cdf_diff(x_top, x_value)
             )
         call_price = (sum_y - sum_x) / self.sum_prob
-        return implied_vol(call_price, 1.0, moneyness, self.tau, 1.0, "call")
+        return self._invert(call_price, moneyness, "call")
+
+    def _invert(self, price: float, moneyness: float, option_type: str) -> float:
+        """Black IV of an undiscounted unit-forward price.
+
+        Jaeckel's analytic inversion first: it is a closed form (~1us) where the
+        bisection needs ~60 Black evaluations (~1.5ms), and the local-vol table
+        inverts one vol per strike per slice.  The bisection stays as the
+        fallback for prices outside the no-arbitrage band, where the analytic
+        algorithm reports ``None`` instead of a vol.
+        """
+        fast = implied_vol_jaeckel(price, 1.0, moneyness, self.tau, option_type)
+        if fast is not None:
+            return fast
+        return implied_vol(price, 1.0, moneyness, self.tau, 1.0, option_type)
 
     def get_implied_vol(self, strikes: Iterable[float]) -> np.ndarray:
         strike_array = np.atleast_1d(np.asarray(strikes, dtype=float))

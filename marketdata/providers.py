@@ -21,6 +21,8 @@ from .listed_contracts import (
     parse_index_option_ticker,
     underlying_future_ticker,
 )
+from .option_contracts import FILE_NAME as CONTRACT_FILE_NAME
+from .option_contracts import spec_for_record
 from .registry import UnderlyingSpec, get_underlying_spec
 
 DEFAULT_INDEX_RATE = 0.015
@@ -182,6 +184,23 @@ class QuoteApiDataProvider(MarketDataProvider):
                 )
         if spot is None:
             raise RuntimeError("No ETF spot snapshot for {}".format(spec.underlying))
+        if not option_records and raw_options:
+            # The ETF option feed is keyed by the exchange's **numeric contract id**
+            # (``10012493.SH`` / ``90008063.SZ``), not by the human-readable code
+            # (``510500C2610M00600``) the parser needs to read strike / expiry /
+            # option type out of - so a whole chain comes back as "no quotes".
+            # Say that instead of letting the fit fail later with "no forwards".
+            raise RuntimeError(
+                "{}: {} option snapshot(s) came back, none readable - the gateway "
+                "keys ETF options by the exchange's numeric contract id and "
+                "data/{} has no entry for this chain.  Run 'python -m "
+                "surface_pricer fetch-contracts --underlying {}' first.".format(
+                    spec.underlying,
+                    len(raw_options),
+                    CONTRACT_FILE_NAME,
+                    spec.underlying,
+                )
+            )
 
         valuation = _valuation_datetime(raw_options)
         return RawSnapshot(
@@ -207,7 +226,14 @@ def _option_records_from_cffex(
     records: List[OptionQuoteRecord] = []
     dropped = 0
     for item in raw_options:
-        parsed = parse_index_option_ticker(item.resp_stk_code or item.ticker, calendar=calendar)
+        # One mechanism for both families (2026-10): the contract file knows the
+        # strike / expiry / kind of every contract, CFFEX included.  A miss falls
+        # back to parsing the code, which is what this used to do for everything.
+        parsed = spec_for_record(item)
+        if parsed is None:
+            parsed = parse_index_option_ticker(
+                item.resp_stk_code or item.ticker, calendar=calendar
+            )
         if parsed is None:
             dropped += 1
             continue
@@ -243,10 +269,16 @@ def _option_records_from_etf(
     records: List[OptionQuoteRecord] = []
     dropped = 0
     for item in raw_options:
-        code = str(item.resp_stk_code or "").strip().upper()
-        if not code.startswith(prefix):
-            continue
-        parsed = parse_etf_option_code(code, calendar=calendar, exchange=exchange)
+        # The contract file first: the feed keys an ETF chain by the exchange's
+        # numeric contract id (``10012493``), which no code parser can read - the
+        # file is what turns it into a strike / expiry / kind.  Without an entry,
+        # the code is parsed as before (a feed that does carry the code still works).
+        parsed = spec_for_record(item)
+        if parsed is None:
+            code = str(item.resp_stk_code or "").strip().upper()
+            if not code.startswith(prefix):
+                continue
+            parsed = parse_etf_option_code(code, calendar=calendar, exchange=exchange)
         if parsed is None:
             dropped += 1
             continue

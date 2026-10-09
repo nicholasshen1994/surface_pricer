@@ -1,9 +1,8 @@
-"""Exotic product pricing (reserved for the next phase).
+"""Exotic product family: the plugin contract, the registry and the products.
 
-The first phase only ships the European vanilla pipeline, so this package is
-deliberately empty of products.  It defines the plug-in contract so that the
-``portfolio`` layer and the CLI can stay unchanged when barrier / autocallable /
-accumulator pricers arrive:
+Each exotic is a **package** next to this module (``autocall/`` today, barrier /
+accumulator later) holding its own terms, effective schedule, cash flows and
+engines, so a new product never shares a file with an engine:
 
 * a pricer is any object implementing :class:`ExoticPricer` (``price`` and
   ``greeks`` taking a contract, a :class:`~surface_pricer.core.market.MarketState`
@@ -12,6 +11,8 @@ accumulator pricers arrive:
   the term-sheet files) to a factory;
 * :func:`get_pricer` / :func:`available_product_types` let callers dispatch by
   product type and fail with a clear message for unsupported ones.
+
+Products register themselves on import (see the trailing import below).
 """
 
 from __future__ import annotations
@@ -61,3 +62,8 @@ __all__ = [
     "get_pricer",
     "register_pricer",
 ]
+
+
+# Import the shipped product modules last so they can register themselves while
+# importing this package for the registry (no circular import).
+from . import autocall  # noqa: E402,F401  (registers autocallable / snowball / autocall)

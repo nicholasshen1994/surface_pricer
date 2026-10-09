@@ -52,7 +52,7 @@ from .marketdata import (
     parse_listed_option,
     underlying_future_ticker,
 )
-from .pricing.contracts import VanillaContract
+from .pricing.vanilla import VanillaContract
 from .pricing.results import PricingResult, RiskSettings
 
 __all__ = [

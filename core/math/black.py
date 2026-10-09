@@ -4,7 +4,14 @@ import math
 from typing import Union
 
 import numpy as np
-from scipy.stats import norm
+from scipy.special import ndtr
+
+# ``scipy.stats.norm.cdf`` costs ~12us per scalar call (it runs the whole
+# rv_continuous machinery: array coercion, support masks); ``ndtr`` is the same
+# function as a plain ufunc at ~1us.  Black pricing is on every hot path (the
+# local-vol table inverts it tens of thousands of times), so the CDF is computed
+# with ndtr and the PDF by hand.
+_SQRT_TWO_PI = math.sqrt(2.0 * math.pi)
 
 
 def _as_array(value):
@@ -33,9 +40,9 @@ def black_price(
     d1 = (np.log(fwd / strike_arr) + 0.5 * sigma_sqrt_t ** 2) / sigma_sqrt_t
     d2 = d1 - sigma_sqrt_t
     if sign > 0:
-        value = fwd * norm.cdf(d1) - strike_arr * norm.cdf(d2)
+        value = fwd * ndtr(d1) - strike_arr * ndtr(d2)
     else:
-        value = strike_arr * norm.cdf(-d2) - fwd * norm.cdf(-d1)
+        value = strike_arr * ndtr(-d2) - fwd * ndtr(-d1)
     result = discount_factor * value
     return float(result) if result.ndim == 0 else result
 
@@ -52,7 +59,13 @@ def black_vega(
         return 0.0
     sigma_sqrt_t = max(float(volatility), 1.0e-12) * math.sqrt(tau)
     d1 = (math.log(float(forward) / float(strike)) + 0.5 * sigma_sqrt_t ** 2) / sigma_sqrt_t
-    return float(discount_factor * forward * norm.pdf(d1) * math.sqrt(tau))
+    return float(
+        discount_factor
+        * forward
+        * math.exp(-0.5 * d1 * d1)
+        / _SQRT_TWO_PI
+        * math.sqrt(tau)
+    )
 
 
 def undiscounted_intrinsic(forward: float, strike: float, option_type: str) -> float:
